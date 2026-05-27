@@ -1,0 +1,779 @@
+import { collection, serverTimestamp, doc, runTransaction } from "firebase/firestore";
+import { db } from "@/lib/firebase";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  Banknote,
+  Check,
+  Minus,
+  Plus,
+  Printer,
+  Receipt,
+  Smartphone,
+  Trash2,
+  X,
+} from "lucide-react";
+import { toast } from "sonner";
+import { formatMoney, getBillingPrice, PLACEHOLDER_IMAGE } from "@/lib/pos/menu";
+import { usePos, type Order } from "@/lib/pos/store";
+import {
+  calculatePayment,
+  canProcessPayment,
+  formatIndianRupees,
+  getAmountReceivedLabel,
+  getBalanceLabel,
+  getPaymentModeLabel,
+  sanitizeAmount,
+  type PaymentMode,
+} from "@/lib/pos/payments";
+import { usePrinter } from "@/context/PrinterContext";
+import { formatOrderForPrinter } from "@/lib/printer-utils";
+import { Receipt as PrintReceipt } from "./Receipt";
+
+type Payment = "cash" | "upi";
+
+export function CartPanel() {
+  const {
+    cart,
+    total,
+    profit,
+    itemCount,
+    increment,
+    decrement,
+    remove,
+    clear,
+    buildTempOrder,
+    commitOrder,
+  } = usePos();
+
+  const [payment, setPayment] = useState<Payment>("cash");
+  // Cash payment state
+  const [cashMode, setCashMode] = useState<PaymentMode>("exact");
+  const [manualCashStr, setManualCashStr] = useState("");
+  // Online payment state
+  const [onlineMode, setOnlineMode] = useState<PaymentMode>("exact");
+  const [manualOnlineStr, setManualOnlineStr] = useState("");
+
+  const [submitting, setSubmitting] = useState(false);
+  const [tempOrder, setTempOrder] = useState<Order | null>(null);
+  const [printed, setPrinted] = useState(false);
+  const printingRef = useRef(false);
+  const printClearTimerRef = useRef<number | null>(null);
+  const printFocusReleaseRef = useRef<(() => void) | null>(null);
+  const [showBill, setShowBill] = useState(false);
+  const [billGenerated, setBillGenerated] = useState(false);
+
+  const cartSignature = useMemo(
+    () =>
+      cart
+        .map((line) => `${line.item.id}:${line.item.name}:${getBillingPrice(line.item)}:${line.quantity}`)
+        .join("|"),
+    [cart],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (printClearTimerRef.current !== null) {
+        window.clearTimeout(printClearTimerRef.current);
+      }
+      if (printFocusReleaseRef.current) {
+        window.removeEventListener("focus", printFocusReleaseRef.current);
+      }
+    };
+  }, []);
+
+  // Reset payment-state when cart empties or payment method changes
+  useEffect(() => {
+    if (cart.length === 0) {
+      setManualCashStr("");
+      setManualOnlineStr("");
+      setCashMode("exact");
+      setOnlineMode("exact");
+    }
+  }, [cart.length]);
+
+  // Calculate cash payment details
+  const cashPayment = useMemo(
+    () => calculatePayment(total, cashMode, manualCashStr),
+    [total, cashMode, manualCashStr]
+  );
+
+  const onlinePayment = useMemo(
+    () => calculatePayment(total, onlineMode, manualOnlineStr),
+    [total, onlineMode, manualOnlineStr]
+  );
+
+  const paymentState = useMemo(
+    () => ({
+      cash: {
+        mode: cashMode,
+        manualAmountStr: manualCashStr,
+        details: cashPayment,
+      },
+      upi: {
+        mode: onlineMode,
+        manualAmountStr: manualOnlineStr,
+        details: onlinePayment,
+      },
+    }),
+    [cashMode, manualCashStr, cashPayment, onlineMode, manualOnlineStr, onlinePayment]
+  );
+
+  const activePaymentState = paymentState[payment];
+
+  useEffect(() => {
+    if (!tempOrder || printed) return;
+
+    const currentAmountReceived = sanitizeAmount(activePaymentState.details.amountReceived);
+    const currentBalanceAmount = sanitizeAmount(activePaymentState.details.balanceAmount);
+
+    if (
+      tempOrder.paymentMethod !== payment ||
+      tempOrder.items.map((line) => `${line.item.id}:${line.item.name}:${getBillingPrice(line.item)}:${line.quantity}`).join("|") !== cartSignature ||
+      sanitizeAmount(tempOrder.totalAmount) !== sanitizeAmount(total) ||
+      sanitizeAmount(tempOrder.amountReceived ?? 0) !== currentAmountReceived ||
+      sanitizeAmount(tempOrder.balanceAmount ?? 0) !== currentBalanceAmount
+    ) {
+      setTempOrder(null);
+      setPrinted(false);
+    }
+  }, [activePaymentState.details.amountReceived, activePaymentState.details.balanceAmount, cartSignature, payment, printed, tempOrder, total]);
+
+  const canSubmit = useMemo(() => {
+    if (cart.length === 0) return false;
+    if (sanitizeAmount(total) <= 0) return false;
+    return canProcessPayment(activePaymentState.mode, activePaymentState.manualAmountStr, total);
+  }, [activePaymentState.manualAmountStr, activePaymentState.mode, cart.length, total]);
+
+  // Removed separate "Generate Bill" flow. Printing now auto-generates, saves and prints.
+
+  const { status: printerStatus, printData, connect: connectPrinter, disconnect: disconnectPrinter, deviceName: connectedPrinterName, error: printerError } = usePrinter();
+
+  const handleGenerateBill = useCallback(() => {
+    if (cart.length === 0) {
+      toast.error("Cart is empty");
+      return;
+    }
+
+    if (!canSubmit) {
+      toast.error("Invalid payment details");
+      return;
+    }
+
+    // Build a temporary order for preview
+    const activeDetails = activePaymentState.details;
+    const amountReceived = sanitizeAmount(activeDetails.amountReceived);
+    const balanceAmount = sanitizeAmount(activeDetails.balanceAmount);
+
+    const paymentDetails = {
+      paymentMethod: payment,
+      paymentMode: activePaymentState.mode,
+      amountReceived,
+      balanceAmount,
+      cashReceived: payment === "cash" ? amountReceived : undefined,
+      paymentReceived: payment === "upi" ? amountReceived : undefined,
+      change: balanceAmount,
+      tip: payment === "upi" ? balanceAmount : undefined,
+    };
+
+    const order = buildTempOrder(paymentDetails);
+    setTempOrder(order);
+    setShowBill(true);
+    setBillGenerated(true);
+    setPrinted(false);
+    toast.success(`Bill ${order.id} generated`, { description: `Preview ready — click Print Bill to finalize.` });
+  }, [cart.length, canSubmit, activePaymentState, payment, buildTempOrder]);
+
+  const handlePrintBill = useCallback(async () => {
+    if (!tempOrder) {
+      toast.error("No bill generated. Click Generate Bill first.");
+      return;
+    }
+
+    try {
+      console.log("Print button clicked");
+
+      const receiptEl = document.getElementById("print-receipt");
+      console.log("Receipt Element:", receiptEl);
+
+      if (!receiptEl) {
+        console.error("Receipt container not found");
+        toast.error("Receipt container missing — cannot print.");
+        return;
+      }
+
+      // Log inner HTML length to detect blank rendering
+      try {
+        console.log("Receipt innerHTML length:", receiptEl.innerHTML?.length ?? 0);
+      } catch (ex) {
+        console.warn("Could not read receipt innerHTML", ex);
+      }
+
+      // Use a transaction to atomically increment and read the last order number
+      const newSeq = await runTransaction(db, async (tx) => {
+        const counterRef = doc(db, "counters", "orders");
+        const counterSnap = await tx.get(counterRef);
+
+        let last = 0;
+        if (!counterSnap.exists()) {
+          // initialize at 1000 to avoid very small numbers, or 0 if you prefer
+          last = 1000;
+          tx.set(counterRef, { lastOrderNumber: last });
+        } else {
+          const data = counterSnap.data() as { lastOrderNumber?: number };
+          last = data?.lastOrderNumber ?? 0;
+        }
+
+        const next = last + 1;
+        tx.update(counterRef, { lastOrderNumber: next });
+
+        // Prepare order payload with sequential ID
+        const formattedId = `ORD-${String(next).padStart(4, "0")}`;
+        const orderPayload = {
+          ...tempOrder,
+          id: formattedId,
+          orderNumber: next,
+          createdAt: serverTimestamp(),
+        } as any;
+
+        const ordersCol = collection(db, "orders");
+        const orderRef = doc(ordersCol);
+        tx.set(orderRef, orderPayload);
+
+        return next;
+      });
+
+      // update local tempOrder id/number so receipt shows sequential id
+      const updatedOrder = tempOrder
+        ? { ...tempOrder, id: `ORD-${String(newSeq).padStart(4, "0")}`, orderNumber: newSeq, createdAt: Date.now() }
+        : null;
+
+      if (updatedOrder) {
+        setTempOrder(updatedOrder);
+        // Commit local order in app state (use updated tempOrder)
+        commitOrder(updatedOrder);
+      }
+
+      // Attempt Bluetooth printing (ESC/POS) if available
+      let bluetoothPrinted = false;
+
+      try {
+        const data = formatOrderForPrinter(updatedOrder as Order);
+
+        if (printerStatus !== "connected") {
+          console.log("Printer not connected, requesting connection...");
+          try {
+            await connectPrinter();
+          } catch (ex) {
+            console.warn("Printer connection failed", ex);
+          }
+        }
+
+        if (printerStatus === "connected") {
+          console.log("Sending bytes to Bluetooth printer...");
+          await printData(data);
+          bluetoothPrinted = true;
+          toast.success("Printed to Bluetooth printer");
+        } else {
+          console.warn("Bluetooth printer not connected; will open system print as fallback");
+        }
+      } catch (printErr) {
+        console.error("Bluetooth print failed:", printErr);
+        toast.error("Bluetooth print failed: " + (printErr as any).message);
+      }
+
+      // Ensure receipt fully renders before printing
+      console.log("Waiting for receipt to render before print...");
+      await new Promise((resolve) => setTimeout(resolve, 800));
+
+      // Final checks before opening print dialog
+      const receiptElPost = document.getElementById("print-receipt");
+      console.log("Receipt Element before print:", receiptElPost);
+
+      if (!receiptElPost || (receiptElPost.innerHTML && receiptElPost.innerHTML.length === 0)) {
+        console.error("Receipt appears empty before print");
+        toast.error("Receipt did not render — aborting print.");
+        return;
+      }
+
+      console.log("Opening print dialog");
+
+      if (!bluetoothPrinted) {
+        try {
+          window.print();
+        } finally {
+          setBillGenerated(false);
+        }
+      } else {
+        // Already printed via Bluetooth
+        setBillGenerated(false);
+      }
+
+      // Reset preview and inputs (hide preview after print)
+      setShowBill(false);
+      setManualCashStr("");
+      setManualOnlineStr("");
+
+      toast.success(`Order saved and printing (#${newSeq})`);
+    } catch (err) {
+      console.error("Print Error:", err);
+      toast.error("Failed to save order before printing");
+    }
+  }, [tempOrder, commitOrder, connectPrinter, printData, printerStatus]);
+  return (
+    <aside
+      className="flex flex-col border-t border-border bg-surface w-full min-h-screen overflow-hidden"
+      style={{ boxShadow: "var(--shadow-left-edge)" }}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-4 sm:px-6 sm:py-5">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-surface-alt text-primary-text">
+            <Receipt className="h-5 w-5" />
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-foreground">Current Order</h2>
+            <p className="text-xs font-medium text-text-secondary tabular">
+              {itemCount} {itemCount === 1 ? "item" : "items"}
+            </p>
+          </div>
+        </div>
+        {cart.length > 0 && (
+          <button
+            onClick={clear}
+            className="flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold text-text-secondary transition-colors hover:bg-surface-alt hover:text-foreground"
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Clear
+          </button>
+        )}
+      </div>
+
+      {/* Cart list */}
+      <div className="px-4 py-4 sm:px-6 flex-1 overflow-y-auto">
+        {cart.length === 0 ? (
+          <EmptyCart />
+        ) : (
+          <motion.ul layout className="flex flex-col gap-3">
+            <AnimatePresence initial={false}>
+              {cart.map((line) => (
+                <motion.li
+                  key={line.item.id}
+                  layout
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: 40, scale: 0.95 }}
+                  transition={{ duration: 0.22, ease: [0.2, 0.8, 0.2, 1] }}
+                  className="flex items-center gap-3 rounded-xl bg-surface-alt p-3"
+                >
+                  <img
+                    src={line.item.image || PLACEHOLDER_IMAGE}
+                    alt={line.item.name}
+                    className="h-12 w-12 flex-shrink-0 rounded-lg object-cover ring-1 ring-border"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-foreground">{line.item.name}</p>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <p className="text-xs font-semibold text-primary-text tabular">
+                        {formatMoney(getBillingPrice(line.item))}
+                      </p>
+                      {line.item.isPriceOverride && line.item.originalPrice !== undefined && (
+                        <p className="text-[11px] font-medium text-text-secondary line-through tabular">
+                          {formatMoney(line.item.originalPrice)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 rounded-full bg-surface p-1 shadow-[var(--shadow-soft-sm)]">
+                    <button
+                      onClick={() => decrement(line.item.id)}
+                      aria-label="Decrease"
+                      className="flex h-10 w-10 items-center justify-center rounded-full text-foreground transition-colors hover:bg-surface-alt sm:h-8 sm:w-8"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="w-7 text-center text-sm font-bold text-foreground tabular sm:w-6">
+                      {line.quantity}
+                    </span>
+                    <button
+                      onClick={() => increment(line.item.id)}
+                      aria-label="Increase"
+                      className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-accent sm:h-8 sm:w-8"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => remove(line.item.id)}
+                    aria-label="Remove"
+                    className="flex h-10 w-10 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-surface hover:text-destructive sm:h-8 sm:w-8"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </motion.li>
+              ))}
+            </AnimatePresence>
+          </motion.ul>
+        )}
+      </div>
+
+      {/* Payment & summary */}
+      <div className="border-t border-border bg-surface px-4 py-4 pb-44 sm:px-6 sm:py-5">        {/* Payment methods */}
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          Payment Method
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <PayBtn
+            active={payment === "cash"}
+            onClick={() => setPayment("cash")}
+            icon={<Banknote className="h-4 w-4" />}
+            label="Cash"
+          />
+          <PayBtn
+            active={payment === "upi"}
+            onClick={() => setPayment("upi")}
+            icon={<Smartphone className="h-4 w-4" />}
+            label="UPI / Online"
+          />
+        </div>
+
+        {/* Cash sub-panel */}
+        <AnimatePresence initial={false}>
+          {payment === "cash" && (
+            <motion.div
+              key="cash-panel"
+              initial={{ height: 0, opacity: 0, marginTop: 0 }}
+              animate={{ height: "auto", opacity: 1, marginTop: 12 }}
+              exit={{ height: 0, opacity: 0, marginTop: 0 }}
+              transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-xl bg-surface-alt p-3">
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-surface p-1">
+                  <SegBtn
+                    active={cashMode === "exact"}
+                    onClick={() => {
+                      setCashMode("exact");
+                      setManualCashStr("");
+                    }}
+                    label="Exact Amount"
+                  />
+                  <SegBtn
+                    active={cashMode === "manual"}
+                    onClick={() => setCashMode("manual")}
+                    label="Manual Entry"
+                  />
+                </div>
+                <AnimatePresence initial={false} mode="wait">
+                  {cashMode === "manual" ? (
+                    <motion.div
+                      key="cash-manual"
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.18 }}
+                      className="mt-3"
+                    >
+                      <label className="mb-1 block text-xs font-semibold text-text-secondary">
+                        {getAmountReceivedLabel("cash")}
+                      </label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step="0.01"
+                        value={manualCashStr}
+                        onChange={(e) => setManualCashStr(e.target.value)}
+                        placeholder="0.00"
+                        className="h-12 w-full rounded-lg border border-border bg-surface px-4 text-base font-bold text-foreground tabular outline-none transition-colors focus:border-primary sm:text-lg"
+                      />
+                      {cashPayment.validationMessage && (
+                        <p className="mt-1.5 text-xs font-medium text-text-secondary">
+                          {cashPayment.validationMessage}
+                        </p>
+                      )}
+                    </motion.div>
+                  ) : (
+                    <motion.p
+                      key="cash-exact"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="mt-3 text-center text-xs font-medium text-text-secondary"
+                    >
+                      {getPaymentModeLabel(cashMode, "cash")}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Online payment sub-panel */}
+        <AnimatePresence initial={false}>
+          {payment === "upi" && (
+            <motion.div
+              key="online-panel"
+              initial={{ height: 0, opacity: 0, marginTop: 0 }}
+              animate={{ height: "auto", opacity: 1, marginTop: 12 }}
+              exit={{ height: 0, opacity: 0, marginTop: 0 }}
+              transition={{ duration: 0.28, ease: [0.2, 0.8, 0.2, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="rounded-xl bg-surface-alt p-3">
+                <div className="grid grid-cols-2 gap-1 rounded-lg bg-surface p-1">
+                  <SegBtn
+                    active={onlineMode === "exact"}
+                    onClick={() => {
+                      setOnlineMode("exact");
+                      setManualOnlineStr("");
+                    }}
+                    label="Exact Amount"
+                  />
+                  <SegBtn
+                    active={onlineMode === "manual"}
+                    onClick={() => setOnlineMode("manual")}
+                    label="Manual Entry"
+                  />
+                </div>
+                <AnimatePresence initial={false} mode="wait">
+                  {onlineMode === "manual" ? (
+                    <motion.div
+                      key="online-manual"
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.18 }}
+                      className="mt-3"
+                    >
+                      <label className="mb-1 block text-xs font-semibold text-text-secondary">
+                        {getAmountReceivedLabel("upi")}
+                      </label>
+                      <input
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        step="0.01"
+                        value={manualOnlineStr}
+                        onChange={(e) => setManualOnlineStr(e.target.value)}
+                        placeholder="0.00"
+                        className="h-12 w-full rounded-lg border border-border bg-surface px-4 text-base font-bold text-foreground tabular outline-none transition-colors focus:border-primary sm:text-lg"
+                      />
+                      {onlinePayment.validationMessage && (
+                        <p className="mt-1.5 text-xs font-medium text-text-secondary">
+                          {onlinePayment.validationMessage}
+                        </p>
+                      )}
+                    </motion.div>
+                  ) : (
+                    <motion.p
+                      key="online-exact"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="mt-3 text-center text-xs font-medium text-text-secondary"
+                    >
+                      {getPaymentModeLabel(onlineMode, "upi")}
+                    </motion.p>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Summary */}
+        <div className="mt-4 space-y-1.5">
+          <Row label="Profit" value={formatIndianRupees(profit)} muted />
+          {payment === "cash" && (
+            <>
+              <Row
+                label={getAmountReceivedLabel("cash")}
+                value={formatIndianRupees(cashPayment.amountReceived)}
+                muted
+              />
+              <Row
+                label={getBalanceLabel("cash", cashPayment)}
+                value={formatIndianRupees(cashPayment.isUnderpaid ? cashPayment.remainingAmount : cashPayment.balanceAmount)}
+                highlight={cashPayment.isUnderpaid || cashPayment.isOverpaid}
+              />
+            </>
+          )}
+          {payment === "upi" && (
+            <>
+              <Row
+                label={getAmountReceivedLabel("upi")}
+                value={formatIndianRupees(onlinePayment.amountReceived)}
+                muted
+              />
+              <Row
+                label={getBalanceLabel("upi", onlinePayment)}
+                value={formatIndianRupees(onlinePayment.isUnderpaid ? onlinePayment.remainingAmount : onlinePayment.balanceAmount)}
+                highlight={onlinePayment.isUnderpaid || onlinePayment.isOverpaid}
+              />
+            </>
+          )}
+          <div className="flex items-end justify-between pt-2">
+            <span className="text-sm font-semibold text-text-secondary">Total</span>
+            <span className="text-2xl font-bold tracking-tight text-foreground tabular sm:text-3xl">
+              {formatIndianRupees(total)}
+            </span>
+          </div>
+        </div>
+
+        {showBill && tempOrder && (
+          <div className="mt-3 rounded-xl bg-surface-alt p-3 shadow-[var(--shadow-soft-sm)]">
+            <PrintReceipt order={tempOrder} />
+          </div>
+        )}
+
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="text-xs text-text-secondary">
+            Printer: {connectedPrinterName ? `${connectedPrinterName} (connected)` : printerStatus}
+            {printerError && <span className="ml-2 text-destructive">{printerError}</span>}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {printerStatus !== "connected" ? (
+              <button
+                onClick={async () => {
+                  try {
+                    await connectPrinter();
+                    toast.success("Printer connected");
+                  } catch (e: any) {
+                    console.error("Connect failed", e);
+                    toast.error("Failed to connect to printer: " + (e?.message || e));
+                  }
+                }}
+                className="text-xs px-3 py-2 rounded-lg bg-surface text-foreground border border-border"
+              >
+                Connect Printer
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  disconnectPrinter();
+                  toast.success("Printer disconnected");
+                }}
+                className="text-xs px-3 py-2 rounded-lg bg-surface text-foreground border border-border"
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          {!billGenerated ? (
+            <button
+              onClick={() => {
+                handleGenerateBill();
+                setBillGenerated(true);
+              }}
+              disabled={cart.length === 0}
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white py-3 rounded-xl font-semibold transition-all duration-200 disabled:opacity-50"
+            >
+              Generate Bill
+            </button>
+          ) : (
+            <button
+              onClick={handlePrintBill}
+              disabled={cart.length === 0}
+              className="w-full bg-black hover:bg-gray-900 text-white py-3 rounded-xl font-semibold transition-all duration-200 disabled:opacity-50"
+            >
+              Print Bill
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Hidden on screen; revealed by @media print rules in styles.css */}
+      <div id="print-receipt" aria-hidden={tempOrder ? "false" : "true"}>
+        <PrintReceipt order={tempOrder} />
+      </div>
+    </aside>
+  );
+}
+
+function PayBtn({
+  active,
+  onClick,
+  icon,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex h-14 items-center justify-center gap-2 rounded-xl border text-sm font-semibold transition-all duration-200 ease-[var(--ease-settle)] ${active
+        ? "border-primary bg-surface-alt text-primary-text shadow-[var(--shadow-soft-sm)]"
+        : "border-border bg-surface text-text-secondary hover:text-foreground"
+        }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function SegBtn({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`h-9 rounded-md text-xs font-semibold transition-all duration-200 ease-[var(--ease-settle)] ${active ? "bg-surface-alt text-primary-text" : "text-text-secondary hover:text-foreground"
+        }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function Row({
+  label,
+  value,
+  muted,
+  highlight,
+}: {
+  label: string;
+  value: string;
+  muted?: boolean;
+  highlight?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className={muted ? "text-text-secondary" : "text-foreground"}>{label}</span>
+      <span
+        className={`font-semibold tabular ${highlight ? "text-success-text" : muted ? "text-text-secondary" : "text-foreground"
+          }`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function EmptyCart() {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 py-10 text-center">
+      <div className="flex h-20 w-20 items-center justify-center rounded-full bg-surface-alt">
+        <Receipt className="h-9 w-9 text-text-secondary" />
+      </div>
+      <p className="text-sm font-semibold text-foreground">Your cart is empty</p>
+      <p className="max-w-[220px] text-xs leading-relaxed text-text-secondary">
+        Select items from the menu to start an order.
+      </p>
+    </div>
+  );
+}
