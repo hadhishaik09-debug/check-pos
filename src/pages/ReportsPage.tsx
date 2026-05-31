@@ -60,8 +60,7 @@ function ReportsPage() {
                     const data = doc.data();
 
                     return {
-                        id: data.orderId,
-
+id: data.id || `ORD-${data.orderNumber || "0000"}`,
                         items: data.items || [],
 
                         totalAmount: data.totalAmount || 0,

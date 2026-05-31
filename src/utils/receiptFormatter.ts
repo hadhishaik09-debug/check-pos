@@ -74,8 +74,12 @@ export function generateReceipt(order: Order): Uint8Array {
   out += horizontalLine();
 
   for (const li of order.items) {
-    const name = li.item.name.substring(0, 30);
-    const lineAmount = li.unitPrice * li.quantity;
+const itemName =
+  li.item?.name ||
+  (li as any).name ||
+  'Unknown Item';
+
+const name = itemName.substring(0, 30);    const lineAmount = li.unitPrice * li.quantity;
     out += padLine(name, formatCurrency(lineAmount));
     out += padLine(`  x${li.quantity}`, `@${formatCurrency(li.unitPrice)}`);
   }
@@ -108,15 +112,9 @@ export function generateReceipt(order: Order): Uint8Array {
   return new TextEncoder().encode(out);
 }
 
-export function generateReceiptBuffer(order: Order): Buffer {
-  const u8 = generateReceipt(order);
-  try {
-    // @ts-ignore
-    if (typeof Buffer !== 'undefined') return Buffer.from(u8);
-  } catch {
-    // ignore
-  }
-  return Buffer.from(u8);
+export function generateReceiptBuffer(order: Order): Uint8Array {
+  // Return a Uint8Array for browser compatibility (avoid Node Buffer)
+  return generateReceipt(order);
 }
 
 export default generateReceipt;

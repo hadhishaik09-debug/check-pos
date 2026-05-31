@@ -7,6 +7,8 @@ export interface PrinterAddress {
   ip?: string; // for tcp
   port?: number; // for tcp
   usbPath?: string; // for usb
+  // Optional human-readable printer name (QZ / OS printer name)
+  printerName?: string;
 }
 
 export interface PrinterStatus {
@@ -36,4 +38,5 @@ export interface PrinterService {
   setAddress(addr: PrinterAddress): Promise<void>;
   printOrder(order: PrintableOrder): Promise<PrintResult>;
   testConnection(): Promise<PrintResult>;
+  listPrinters?(): Promise<string[]>;
 }

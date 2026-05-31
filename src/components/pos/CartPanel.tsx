@@ -18,6 +18,7 @@ import {
 } from "@/lib/pos/payments";
 import { Receipt as PrintReceipt } from "./Receipt";
 import { PrinterSettingsModal } from "../PrinterSettingsModal";
+import { printerService } from "@/printer/service";
 
 type Payment = "cash" | "upi";
 
@@ -59,13 +60,16 @@ export function CartPanel() {
   // Load initial printer status and subscribe to updates (desktop only)
   useEffect(() => {
     const loadPrinterStatus = async () => {
-      if (typeof window !== "undefined" && (window as any).electronAPI) {
-        try {
+      try {
+        if (typeof window !== "undefined" && (window as any).electronAPI) {
           const status = await (window as any).electronAPI.getPrinterStatus();
           setPrinterStatus(status);
-        } catch (e) {
-          console.warn("Failed to load printer status", e);
+        } else {
+          const s = await printerService.getStatus();
+          setPrinterStatus({ isConnected: !!s.isConnected, ip: s.address?.ip ?? s.address?.printerName ?? 'unknown', port: s.address?.port ?? 0 });
         }
+      } catch (e) {
+        console.warn("Failed to load printer status", e);
       }
     };
 
@@ -159,33 +163,51 @@ export function CartPanel() {
     setIsProcessing(true);
     try {
       const txResult = await runTransaction(db, async (tx) => {
-        const counterRef = doc(db, "counters", "orders");
+        // Use date-based daily counters. Document ID is YYYY-MM-DD
+        const now = new Date();
+        const dateKey = now.toISOString().slice(0, 10); // e.g. 2026-05-31
+
+        const counterRef = doc(db, "counters", dateKey);
         const counterSnap = await tx.get(counterRef);
 
-        let last = 0;
+        let next = 1;
         if (!counterSnap.exists()) {
-          last = 1000;
-          tx.set(counterRef, { lastOrderNumber: last });
+          // initialize today's counter to 1
+          tx.set(counterRef, { lastOrderNumber: next });
         } else {
           const data = counterSnap.data() as { lastOrderNumber?: number };
-          last = data?.lastOrderNumber ?? 0;
+          const last = data?.lastOrderNumber ?? 0;
+          next = last + 1;
+          tx.update(counterRef, { lastOrderNumber: next });
         }
 
-        const next = last + 1;
-        tx.update(counterRef, { lastOrderNumber: next });
-
         const formattedId = `ORD-${String(next).padStart(4, "0")}`;
-        const orderPayload = { ...tempOrder, id: formattedId, orderNumber: next, createdAt: serverTimestamp() } as any;
+
+        const orderPayload = {
+          ...tempOrder,
+          id: formattedId,
+          orderNumber: next,
+          orderDateKey: dateKey,
+          dailyOrderNumber: next,
+          createdAt: serverTimestamp(),
+        } as any;
 
         const ordersCol = collection(db, "orders");
         const orderRef = doc(ordersCol);
         tx.set(orderRef, orderPayload);
 
-        return { next, orderId: orderRef.id };
+        return { next, orderId: orderRef.id, dateKey };
       });
 
       const updatedOrder = tempOrder
-        ? { ...tempOrder, id: `ORD-${String(txResult.next).padStart(4, "0")}`, orderNumber: txResult.next, createdAt: Date.now() }
+        ? {
+            ...tempOrder,
+            id: `ORD-${String(txResult.next).padStart(4, "0")}`,
+            orderNumber: txResult.next,
+            orderDateKey: txResult.dateKey,
+            dailyOrderNumber: txResult.next,
+            createdAt: Date.now(),
+          }
         : null;
 
       if (updatedOrder) {
@@ -225,16 +247,48 @@ export function CartPanel() {
             toast.error("Print failed: " + (e instanceof Error ? e.message : String(e)));
           }
         } else {
-          // Non-desktop clients should not attempt local printing
-          toast.success(`Order saved (#${txResult.next}). Print from desktop app.`);
-          setTimeout(() => {
-            clear();
-            setShowBill(false);
-            setBillGenerated(false);
-            setTempOrder(null);
-            setManualCashStr("");
-            setManualOnlineStr("");
-          }, 300);
+          // Web clients: attempt to print via QZ Tray (printerService) if available.
+          try {
+            const printable = {
+              id: updatedOrder.id,
+              orderNumber: updatedOrder.orderNumber,
+              items: updatedOrder.items.map((l) => ({ name: l.item.name, qty: l.quantity, unitPrice: getBillingPrice(l.item) })),
+              totalAmount: updatedOrder.totalAmount,
+              amountReceived: updatedOrder.amountReceived,
+              balanceAmount: updatedOrder.balanceAmount,
+              paymentMethod: updatedOrder.paymentMethod,
+              createdAt: updatedOrder.createdAt,
+            };
+
+            const res = await printerService.printOrder(printable as any);
+            if (res.success) {
+              try {
+                await runTransaction(db, async (tx) => {
+                  const orderDocRef = doc(db, "orders", txResult.orderId);
+                  tx.update(orderDocRef, { printedByQZ: true, printedAt: serverTimestamp() });
+                });
+              } catch (e) {
+                console.warn("Failed to mark printed in Firestore:", e);
+              }
+
+              toast.success(`Order #${txResult.next} printed successfully`);
+
+              setTimeout(() => {
+                clear();
+                setShowBill(false);
+                setBillGenerated(false);
+                setTempOrder(null);
+                setManualCashStr("");
+                setManualOnlineStr("");
+              }, 500);
+            } else {
+              toast.error(`Print failed: ${res.message ?? 'Unknown error'}`);
+              // keep the order saved; user can retry from desktop
+            }
+          } catch (e) {
+            console.error('Print via printerService failed:', e);
+            toast.error('Print failed: ' + (e instanceof Error ? e.message : String(e)));
+          }
         }
       }
     } catch (err) {
@@ -349,8 +403,7 @@ export function CartPanel() {
         </div>
 
         {showBill && tempOrder && (
-          <div className="mb-4 rounded-lg sm:rounded-xl bg-surface-alt p-2 sm:p-3 shadow-[var(--shadow-soft-sm)] max-h-48 overflow-y-auto">
-            <PrintReceipt order={tempOrder} />
+<div className="mb-4 rounded-lg sm:rounded-xl bg-surface-alt p-2 sm:p-3 shadow-[var(--shadow-soft-sm)]">            <PrintReceipt order={tempOrder} />
           </div>
         )}
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle, Wifi, WifiOff, Settings, X } from 'lucide-react';
 import { toast } from 'sonner';
+import { printerService } from '@/printer/service';
 import {
   Dialog,
   DialogContent,
@@ -30,6 +31,9 @@ export function PrinterSettingsModal() {
   const [tempPort, setTempPort] = useState(printerStatus.port.toString());
   const [isLoading, setIsLoading] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [qzPrinters, setQzPrinters] = useState<string[]>([]);
+  const [selectedQzPrinter, setSelectedQzPrinter] = useState<string | undefined>(undefined);
+  const [isFetchingPrinters, setIsFetchingPrinters] = useState(false);
 
   // Load initial printer status
   useEffect(() => {
@@ -47,6 +51,24 @@ export function PrinterSettingsModal() {
     };
 
     loadPrinterStatus();
+
+    // If not desktop, try to fetch available QZ Tray printers
+    const loadQzPrinters = async () => {
+      if (typeof window !== 'undefined' && !(window as any).electronAPI) {
+        setIsFetchingPrinters(true);
+        try {
+          const list = await printerService.listPrinters();
+          setQzPrinters(list);
+          if (list.length > 0) setSelectedQzPrinter((list[0] as string) || undefined);
+        } catch (e) {
+          console.warn('Failed to fetch QZ printers', e);
+        } finally {
+          setIsFetchingPrinters(false);
+        }
+      }
+    };
+
+    loadQzPrinters();
 
     // Listen for printer status changes
     let unsubscribe: (() => void) | null = null;
@@ -82,6 +104,21 @@ export function PrinterSettingsModal() {
           setOpen(false);
         } else {
           toast.error(result.message || 'Failed to update settings');
+        }
+      } else {
+        // Web: save selected QZ printer (require selection)
+        if (!selectedQzPrinter) {
+          toast.error('Please select printer');
+          return;
+        }
+
+        try {
+          await printerService.setAddress({ protocol: 'qz', printerName: selectedQzPrinter, ip: tempIP, port });
+          toast.success('Printer settings saved');
+          setOpen(false);
+        } catch (e) {
+          console.error('Failed to save printer settings:', e);
+          toast.error('Failed to save settings');
         }
       }
     } catch (error) {
@@ -156,6 +193,26 @@ export function PrinterSettingsModal() {
               {printerStatus.ip}:{printerStatus.port}
             </span>
           </div>
+
+          {/* QZ Tray Printers (Web) */}
+          {!window.electronAPI && (
+            <div className="space-y-2">
+              <Label htmlFor="qz-printers" className="text-sm font-medium">Available QZ Printers</Label>
+              {isFetchingPrinters ? (
+                <div className="text-xs text-gray-600">Fetching printers...</div>
+              ) : qzPrinters.length === 0 ? (
+                <div className="text-xs text-gray-600">No QZ Tray printers found. Ensure QZ Tray is running and authorized.</div>
+              ) : (
+                <select id="qz-printers" className="w-full p-2 rounded border" value={selectedQzPrinter} onChange={(e) => setSelectedQzPrinter(e.target.value)}>
+                  <option value="">-- Select a printer --</option>
+                  {qzPrinters.map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              )}
+              <p className="text-xs text-gray-600">Select your Windows-installed printer for QZ Tray printing.</p>
+            </div>
+          )}
 
           {/* IP Address */}
           <div className="space-y-2">
