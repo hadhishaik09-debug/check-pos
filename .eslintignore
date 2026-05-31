@@ -1,0 +1,10 @@
+.vite
+dist
+dev-dist
+public
+node_modules
+*.log
+coverage
+.turbo
+/.next
+/.out
