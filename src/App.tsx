@@ -7,6 +7,7 @@ import { Sidebar } from "./components/pos/Sidebar";
 import MenuPage from "./pages/MenuPage";
 import ReportsPage from "./pages/ReportsPage";
 
+
 type Tab = "pos" | "menu" | "reports";
 
 export default function App() {
