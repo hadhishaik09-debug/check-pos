@@ -4,7 +4,7 @@
  * - Keeps backward-compat re-exports for existing modules to avoid breaking changes
  */
 import * as types from './types';
-import { generateReceipt, generateReceiptBuffer } from '../utils/receiptFormatter';
+import { generateReceipt, generateReceiptBuffer } from '../utils/receiptFormatter.ts';
 import { formatOrderForPrinter } from '../lib/printer-utils';
 import printerService from './service';
 

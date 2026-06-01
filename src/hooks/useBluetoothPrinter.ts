@@ -173,11 +173,9 @@ export function useBluetoothPrinter(): BluetoothPrinterHook {
 
       // ✅ SAVE PRINTER TO FIREBASE
       await savePrinterSettings({
+        protocol: 'bluetooth',
         printerId: device.id,
-
-        printerName:
-          device.name ||
-          "Thermal Printer",
+        printerName: device.name || 'Thermal Printer',
       });
 
       console.log(

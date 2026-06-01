@@ -134,3 +134,18 @@ module.exports = {
   centerText,
   horizontalLine,
 };
+
+// Provide a buffer-compatible export for browser code expecting a Uint8Array
+function generateReceiptBuffer(order) {
+  try {
+    return new TextEncoder().encode(generateReceipt(order));
+  } catch (e) {
+    // fallback to simple string -> array conversion
+    const str = String(generateReceipt(order));
+    const arr = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; i++) arr[i] = str.charCodeAt(i);
+    return arr;
+  }
+}
+
+module.exports.generateReceiptBuffer = generateReceiptBuffer;

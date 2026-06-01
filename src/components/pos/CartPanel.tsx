@@ -17,8 +17,7 @@ import {
   type PaymentMode,
 } from "@/lib/pos/payments";
 import { Receipt as PrintReceipt } from "./Receipt";
-import { PrinterSettingsModal } from "../PrinterSettingsModal";
-import { printerService } from "@/printer/service";
+import { printerService } from "../../printer/service";
 
 type Payment = "cash" | "upi";
 
@@ -48,14 +47,40 @@ export function CartPanel() {
     [cart],
   );
 
+  const resetOrderState = useCallback(() => {
+    setShowBill(false);
+    setBillGenerated(false);
+    setTempOrder(null);
+    setManualCashStr("");
+    setManualOnlineStr("");
+    setCashMode("exact");
+    setOnlineMode("exact");
+  }, [setShowBill, setBillGenerated, setTempOrder, setManualCashStr, setManualOnlineStr, setCashMode, setOnlineMode]);
+
   useEffect(() => {
-    if (cart.length === 0) {
-      setManualCashStr("");
-      setManualOnlineStr("");
-      setCashMode("exact");
-      setOnlineMode("exact");
+    // When cart becomes empty and we're not actively processing a print/save,
+    // reset bill/receipt state. Do NOT reset while printing (isProcessing=true)
+    // because commitOrder() clears the cart before the printing flow completes.
+    if (cart.length === 0 && !isProcessing) {
+      resetOrderState();
+    }
+  }, [cart.length, isProcessing, resetOrderState]);
+
+  useEffect(() => {
+    // When new items are added to cart, ensure the Generate Bill button and
+    // preview are reset so the new order starts fresh.
+    if (cart.length > 0) {
+      setBillGenerated(false);
+      setShowBill(false);
+      setTempOrder(null);
     }
   }, [cart.length]);
+
+  const handleClear = useCallback(() => {
+    clear();
+    // ensure all bill/preview state is reset when user clears the cart
+    resetOrderState();
+  }, [clear, resetOrderState]);
 
   // Load initial printer status and subscribe to updates (desktop only)
   useEffect(() => {
@@ -232,12 +257,8 @@ export function CartPanel() {
               toast.success(`Order #${txResult.next} printed successfully`);
 
               setTimeout(() => {
-                clear();
-                setShowBill(false);
-                setBillGenerated(false);
-                setTempOrder(null);
-                setManualCashStr("");
-                setManualOnlineStr("");
+                // ensure a consistent reset path after successful print/save
+                resetOrderState();
               }, 500);
             } else {
               toast.error(`Print failed: ${result?.message ?? "Unknown error"}`);
@@ -274,12 +295,8 @@ export function CartPanel() {
               toast.success(`Order #${txResult.next} printed successfully`);
 
               setTimeout(() => {
-                clear();
-                setShowBill(false);
-                setBillGenerated(false);
-                setTempOrder(null);
-                setManualCashStr("");
-                setManualOnlineStr("");
+                // ensure a consistent reset path after successful print/save
+                resetOrderState();
               }, 500);
             } else {
               toast.error(`Print failed: ${res.message ?? 'Unknown error'}`);
@@ -297,14 +314,14 @@ export function CartPanel() {
     } finally {
       setIsProcessing(false);
     }
-  }, [tempOrder, commitOrder, clear, manualCashStr, manualOnlineStr]);
+  }, [tempOrder, commitOrder, clear, manualCashStr, manualOnlineStr, resetOrderState]);
 
   // UI helpers
   const mobileOnly = "md:hidden";
   const desktopOnly = "hidden md:flex";
 
   return (
-    <aside className="flex flex-col border-t border-border bg-surface w-full min-h-screen overflow-hidden">
+    <aside className="flex flex-col border-t border-border bg-surface w-full min-h-screen">
       <div className="flex items-center justify-between border-b border-border px-3 py-3 sm:px-6 sm:py-4">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg sm:rounded-xl bg-surface-alt text-primary-text flex-shrink-0">
@@ -317,9 +334,8 @@ export function CartPanel() {
         </div>
 
         <div className="flex items-center gap-2">
-          <PrinterSettingsModal />
           {cart.length > 0 && (
-            <button onClick={clear} className="flex h-8 sm:h-9 items-center gap-1 rounded-lg px-2 sm:px-3 text-xs font-semibold text-text-secondary transition-colors hover:bg-surface-alt hover:text-foreground" title="Clear cart">
+            <button onClick={handleClear} className="flex h-8 sm:h-9 items-center gap-1 rounded-lg px-2 sm:px-3 text-xs font-semibold text-text-secondary transition-colors hover:bg-surface-alt hover:text-foreground" title="Clear cart">
               <Trash2 className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Clear</span>
             </button>
@@ -358,21 +374,8 @@ export function CartPanel() {
         )}
       </div>
 
-      <div className="border-t border-border bg-surface px-3 py-3 sm:px-6 sm:py-4 pb-44 sm:pb-44 max-h-[60vh] overflow-y-auto">
-        <div className="mb-4 flex items-center gap-2 rounded-lg bg-gray-50 p-2 sm:p-3">
-          {printerStatus.isConnected ? (
-            <>
-              <CheckCircle className="h-4 w-4 sm:h-5 sm:w-5 text-green-600 flex-shrink-0" />
-              <span className="text-xs sm:text-sm font-medium text-green-600">Printer Ready</span>
-            </>
-          ) : (
-            <>
-              <AlertCircle className="h-4 w-4 sm:h-5 sm:w-5 text-red-600 flex-shrink-0" />
-              <span className="text-xs sm:text-sm font-medium text-red-600">Printer Offline</span>
-            </>
-          )}
-          <span className="text-xs text-gray-600 ml-auto">{printerStatus.ip}:{printerStatus.port}</span>
-        </div>
+      <div className="border-t border-border bg-surface px-3 py-3 sm:px-6 sm:py-4 pb-44 sm:pb-44">
+        {/* Printer status card removed - Printer Settings button moved to header */}
 
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-secondary">Payment Method</p>
         <div className="grid grid-cols-2 gap-2 mb-4">
@@ -403,7 +406,10 @@ export function CartPanel() {
         </div>
 
         {showBill && tempOrder && (
-<div className="mb-4 rounded-lg sm:rounded-xl bg-surface-alt p-2 sm:p-3 shadow-[var(--shadow-soft-sm)]">            <PrintReceipt order={tempOrder} />
+          <div className="mb-4 rounded-lg sm:rounded-xl bg-surface-alt p-2 sm:p-3 shadow-[var(--shadow-soft-sm)]">
+            <div className="w-full">
+              <PrintReceipt order={tempOrder} />
+            </div>
           </div>
         )}
 

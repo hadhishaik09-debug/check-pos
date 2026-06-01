@@ -99,8 +99,10 @@ export default defineConfig({
         ],
       },
 
+      // Disable dev service worker to avoid intercepting module requests
+      // during development which can cause aborted requests / blank pages.
       devOptions: {
-        enabled: true,
+        enabled: false,
       },
     }),
   ],

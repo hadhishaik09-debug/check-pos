@@ -1,7 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { motion } from "framer-motion";
 import { Plus, Search } from "lucide-react";
-import { BluetoothPrinterControl } from "./BluetoothPrinterControl";
+import { PrinterSettingsModal } from "../PrinterSettingsModal";
 import { formatMoney, PLACEHOLDER_IMAGE } from "@/lib/pos/menu";
 import { usePos } from "@/lib/pos/store";
 import { parseAmount } from "@/lib/pos/payments";
@@ -88,7 +88,7 @@ export function MenuGrid() {
                 className="h-12 w-full rounded-xl border border-border bg-surface pl-11 pr-4 text-base text-foreground shadow-[var(--shadow-soft-sm)] outline-none transition-colors focus:border-primary sm:text-sm"
               />
             </div>
-            <BluetoothPrinterControl />
+            <PrinterSettingsModal />
           </div>
         </div>
         <div className="-mx-3 flex gap-2 overflow-x-auto px-3 pb-1 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0 sm:pb-0">
